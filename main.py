@@ -14,25 +14,20 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 TOKEN = os.getenv("TG_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("USER_ID", 0))
 
-# Файлы для хранения всех 4 кук
 COOKIES_DIR = "session_data"
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
 COOKIE_FILES = {
-    "ATERNOS_SEC_USER": os.path.join(COOKIES_DIR, "sec_user.txt"),
-    "ATERNOS_SEC_SESSION": os.path.join(COOKIES_DIR, "sec_session.txt"),
-    "xf_user": os.path.join(COOKIES_DIR, "xf_user.txt"),
-    "xf_session": os.path.join(COOKIES_DIR, "xf_session.txt")
+    "ATERNOS_SESSION": os.path.join(COOKIES_DIR, "aternos_session.txt"),
+    "gamera_user_id": os.path.join(COOKIES_DIR, "gamera_user.txt"),
+    "uid": os.path.join(COOKIES_DIR, "uid.txt")
 }
 
-# --- НАСТРОЙКА FSM ДЛЯ ПОШАГОВОГО ВВОДА ---
 class SessionStates(StatesGroup):
-    waiting_for_sec_user = State()
-    waiting_for_sec_session = State()
-    waiting_for_xf_user = State()
-    waiting_for_xf_session = State()
+    waiting_for_session = State()
+    waiting_for_gamera = State()
+    waiting_for_uid = State()
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER PORT TIMEOUT ---
 class FakeWebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -45,7 +40,6 @@ def run_fake_web_server():
     server = HTTPServer(("0.0.0.0", port), FakeWebHandler)
     server.serve_forever()
 
-# --- ЛОГИКА РАБОТЫ С КУКАМИ ---
 def load_cookies():
     loaded = {}
     for key, file_path in COOKIE_FILES.items():
@@ -61,7 +55,6 @@ def save_cookie_value(key, value):
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(value.strip())
 
-# --- КНОПКИ И МЕНЮ ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -74,7 +67,7 @@ def get_main_keyboard():
     builder.button(text="⏹️ Остановить", callback_data="srv_stop")
     builder.button(text="📊 Статус", callback_data="srv_status")
     builder.button(text="💻 Консоль", callback_data="srv_console")
-    builder.button(text="🔑 Настроить куки (4 шт)", callback_data="srv_settings")
+    builder.button(text="🔑 Настроить куки (3 шт)", callback_data="srv_settings")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -83,12 +76,9 @@ def get_cancel_keyboard():
     builder.button(text="❌ Отмена", callback_data="srv_cancel_input")
     return builder.as_markup()
 
-# --- ВЗАИМОДЕЙСТВИЕ С ATERNOS ---
 def aternos_action(action_type):
     try:
         current_cookies = load_cookies()
-        
-        # Проверяем заполненность данных
         if not all(current_cookies.values()):
             return "⚠️ Настроены не все куки! Нажмите кнопку 'Настроить куки' в меню."
 
@@ -100,22 +90,17 @@ def aternos_action(action_type):
         }
         
         session = requests.Session()
-        # Загружаем полную сессию со всеми предоставленными куками
         session.cookies.update(current_cookies)
         
-        # Шаг 1. Переход на страницу сервера для обновления токенов авторизации
         page = session.get("https://aternos.org", headers=headers, timeout=10)
-        
         if page.status_code == 403:
-            return "❌ Ошибка 403: Защита Cloudflare отклонила запрос. Обновите ВСЕ 4 куки свежими значениями из браузера."
+            return "❌ Ошибка 403: Доступ заблокирован Cloudflare. Попробуйте обновить куки заново."
         
-        # Парсим токен сессии (SEC_TOKEN)
         token_match = re.search(r'window\.ATERNOS_SEC_TOKEN\s*=\s*"([a-zA-Z0-9]+)"', page.text)
         if not token_match:
-            return "⚠️ Сессия не авторизована (Токен безопасности не найден). Перезапишите куки."
+            return "⚠️ Не удалось авторизоваться (Токен безопасности не найден). Обновите куки."
         sec_token = token_match.group(1)
         
-        # Шаг 2. Обработка действий панели управления
         if action_type == "status":
             if "statuslabel-live" in page.text: return "🟢 Онлайн"
             if "statuslabel-loading" in page.text or "statuslabel-preparing" in page.text: return "⏳ Запускается..."
@@ -129,7 +114,7 @@ def aternos_action(action_type):
             res = session.post(action_url, params={"SEC": sec_token}, headers=headers, timeout=10)
             if res.status_code == 200:
                 return "🚀 Запрос на запуск отправлен!" if action_type == "start" else "🛑 Сигнал на остановку отправлен."
-            return f"⚠️ Ошибка выполнения PHP. Код ответа: {res.status_code}"
+            return f"⚠️ Ошибка выполнения. Код ответа: {res.status_code}"
             
         elif action_type == "console":
             log_url = "https://aternos.orglog.php"
@@ -140,18 +125,17 @@ def aternos_action(action_type):
                     lines = log_data.split("\n")[-15:]
                     return "\n".join(lines)
                 except:
-                    return "⚠️ Ошибка разбора лог-файла."
+                    return "⚠️ Ошибка разбора логов."
             return "⚠️ Не удалось получить данные консоли."
             
     except Exception as e:
         return f"❌ Крит. ошибка: {str(e)}"
 
-# --- ХЕНДЛЕРЫ КОМАНД ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     if not is_owner(message): return
     await state.clear()
-    await message.answer("👋 Меню управления сервером Aternos (Синхронизация через 4 куки):", reply_markup=get_main_keyboard())
+    await message.answer("👋 Меню управления сервером Aternos:", reply_markup=get_main_keyboard())
 
 @dp.callback_query(F.data == "srv_cancel_input")
 async def cancel_input(callback: types.CallbackQuery, state: FSMContext):
@@ -179,51 +163,39 @@ async def handle_callbacks(callback: types.CallbackQuery, state: FSMContext):
         
     elif action == "srv_settings":
         await callback.answer()
-        await state.set_state(SessionStates.waiting_for_sec_user)
+        await state.set_state(SessionStates.waiting_for_session)
         await callback.message.edit_text(
-            "🔑 *Настройка кук сессии (Шаг 1 из 4)*\n\nОтправьте текстовым сообщением значение для куки:\n`ATERNOS_SEC_USER`",
+            "🔑 *Настройка кук (Шаг 1 из 3)*\n\nОтправьте значение для куки:\n`ATERNOS_SESSION`",
             parse_mode="Markdown", reply_markup=get_cancel_keyboard()
         )
 
-# --- ПОШАГОВЫЙ ИНТЕРФЕЙС НАСТРОЙКИ СЕССИИ (FSM) ---
-@dp.message(StateFilter(SessionStates.waiting_for_sec_user))
-async def process_sec_user(message: types.Message, state: FSMContext):
+@dp.message(StateFilter(SessionStates.waiting_for_session))
+async def process_session(message: types.Message, state: FSMContext):
     if not is_owner(message): return
-    save_cookie_value("ATERNOS_SEC_USER", message.text)
-    await state.set_state(SessionStates.waiting_for_sec_session)
+    save_cookie_value("ATERNOS_SESSION", message.text)
+    await state.set_state(SessionStates.waiting_for_gamera)
     await message.answer(
-        "✅ Принято.\n\n*Шаг 2 из 4*: Отправьте значение для куки:\n`ATERNOS_SEC_SESSION`",
+        "✅ Принято.\n\n*Шаг 2 из 3*: Отправьте значение для куки:\n`gamera_user_id`",
         parse_mode="Markdown", reply_markup=get_cancel_keyboard()
     )
 
-@dp.message(StateFilter(SessionStates.waiting_for_sec_session))
-async def process_sec_session(message: types.Message, state: FSMContext):
+@dp.message(StateFilter(SessionStates.waiting_for_gamera))
+async def process_gamera(message: types.Message, state: FSMContext):
     if not is_owner(message): return
-    save_cookie_value("ATERNOS_SEC_SESSION", message.text)
-    await state.set_state(SessionStates.waiting_for_xf_user)
+    save_cookie_value("gamera_user_id", message.text)
+    await state.set_state(SessionStates.waiting_for_uid)
     await message.answer(
-        "✅ Принято.\n\n*Шаг 3 из 4*: Отправьте значение для куки:\n`xf_user`",
+        "✅ Принято.\n\n*Шаг 3 из 3*: Отправьте значение для куки:\n`uid` (или `u` из самого низа вашего списка, если uid пустой)",
         parse_mode="Markdown", reply_markup=get_cancel_keyboard()
     )
 
-@dp.message(StateFilter(SessionStates.waiting_for_xf_user))
-async def process_xf_user(message: types.Message, state: FSMContext):
+@dp.message(StateFilter(SessionStates.waiting_for_uid))
+async def process_uid(message: types.Message, state: FSMContext):
     if not is_owner(message): return
-    save_cookie_value("xf_user", message.text)
-    await state.set_state(SessionStates.waiting_for_xf_session)
-    await message.answer(
-        "✅ Принято.\n\n*Шаг 4 из 4*: Отправьте финальное значение куки:\n`xf_session`",
-        parse_mode="Markdown", reply_markup=get_cancel_keyboard()
-    )
-
-@dp.message(StateFilter(SessionStates.waiting_for_xf_session))
-async def process_xf_session(message: types.Message, state: FSMContext):
-    if not is_owner(message): return
-    save_cookie_value("xf_session", message.text)
+    save_cookie_value("uid", message.text)
     await state.clear()
-    await message.answer("🎉 Полная сессия из 4 кук успешно обновлена и сохранена на сервере!", reply_markup=get_main_keyboard())
+    await message.answer("🎉 Новая сессия успешно сохранена! Попробуйте проверить статус сервера.", reply_markup=get_main_keyboard())
 
-# --- ЗАПУСК ---
 async def main():
     Thread(target=run_fake_web_server, daemon=True).start()
     await dp.start_polling(bot)
