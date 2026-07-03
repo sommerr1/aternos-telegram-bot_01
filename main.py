@@ -1,7 +1,6 @@
 import os
 import re
 import asyncio
-import requests
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types, F
@@ -11,13 +10,20 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# ИМПОРТИРУЕМ curl_cffi ДЛЯ ОБХОДА CLOUDFLARE
+from curl_cffi import requests as curl_requests
+
 TOKEN = os.getenv("TG_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("USER_ID", 0))
+
+# --- НАСТРОЙКА ПРОКСИ (ПРИ НЕОБХОДИМОСТИ) ---
+# Если даже curl_cffi получит 403, впишите сюда свой прокси (SOCKS5 или HTTP)
+# Пример формата: "http://user:password@proxy_address:port"
+PROXY_URL = None 
 
 COOKIES_DIR = "session_data"
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
-# Файлы для сохранения настроек
 COOKIE_FILES = {
     "session_name": os.path.join(COOKIES_DIR, "session_name.txt"),
     "session_val": os.path.join(COOKIES_DIR, "session_val.txt"),
@@ -85,7 +91,6 @@ def aternos_action(action_type):
         if not all(data.values()):
             return "⚠️ Данные авторизации не заполнены! Пройдите настройку из 4 шагов."
 
-        # Формируем словарь кук динамически на основе сохраненного имени сессии
         cookies = {
             data["session_name"]: data["session_val"],
             "gamera_user_id": data["gamera_user_id"],
@@ -93,22 +98,28 @@ def aternos_action(action_type):
         }
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://aternos.org",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
         }
         
-        session = requests.Session()
+        # Используем Session из curl_cffi с имперсонацией браузера Chrome
+        session = curl_requests.Session(impersonate="chrome120")
         session.cookies.update(cookies)
         
-        page = session.get("https://aternos.org", headers=headers, timeout=10)
+        # Конфигурируем прокси, если переменная заполнена
+        if PROXY_URL:
+            session.proxies = {"http": PROXY_URL, "https": PROXY_URL}
+
+        page = session.get("https://aternos.org", headers=headers, timeout=15)
+        
         if page.status_code == 403:
-            return "❌ Ошибка 403: Cloudflare отклонил запрос. Обновите сессию."
+            return "❌ Ошибка 403: Cloudflare жестко заблокировал IP вашего хостинга. Требуется подключение прокси."
         
         token_match = re.search(r'window\.ATERNOS_SEC_TOKEN\s*=\s*"([a-zA-Z0-9]+)"', page.text)
         if not token_match:
-            return "⚠️ Токен безопасности (SEC_TOKEN) не найден. Обновите куки в боте."
+            return "⚠️ Токен безопасности (SEC_TOKEN) не найден в коде. Возможно, сессия устарела."
         sec_token = token_match.group(1)
         
         if action_type == "status":
@@ -121,31 +132,31 @@ def aternos_action(action_type):
             ajax_action = "start" if action_type == "start" else "stop"
             action_url = f"https://aternos.org{ajax_action}.php"
             
-            res = session.post(action_url, params={"SEC": sec_token}, headers=headers, timeout=10)
+            res = session.post(action_url, params={"SEC": sec_token}, headers=headers, timeout=15)
             if res.status_code == 200:
                 return "🚀 Запрос на запуск отправлен!" if action_type == "start" else "🛑 Сигнал на остановку отправлен."
-            return f"⚠️ Ошибка выполнения. Код ответа: {res.status_code}"
+            return f"⚠️ Ошибка выполнения операции. Код ответа: {res.status_code}"
             
         elif action_type == "console":
             log_url = "https://aternos.orglog.php"
-            res = session.get(log_url, params={"SEC": sec_token}, headers=headers, timeout=10)
+            res = session.get(log_url, params={"SEC": sec_token}, headers=headers, timeout=15)
             if res.status_code == 200:
                 try:
                     log_data = res.json().get("log", "Консоль пуста.")
                     lines = log_data.split("\n")[-15:]
                     return "\n".join(lines)
                 except:
-                    return "⚠️ Ошибка разбора логов."
-            return "⚠️ Не удалось получить данные консоли."
+                    return "⚠️ Ошибка разбора логов сервера."
+            return "⚠️ Не удалось получить данные логов."
             
     except Exception as e:
-        return f"❌ Крит. ошибка: {str(e)}"
+        return f"❌ Крит. ошибка структуры запроса: {str(e)}"
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     if not is_owner(message): return
     await state.clear()
-    await message.answer("👋 Меню управления сервером Aternos:", reply_markup=get_main_keyboard())
+    await message.answer("👋 Меню управления сервером Aternos (Имперсонация Chrome):", reply_markup=get_main_keyboard())
 
 @dp.callback_query(F.data == "srv_cancel_input")
 async def cancel_input(callback: types.CallbackQuery, state: FSMContext):
@@ -165,7 +176,7 @@ async def handle_callbacks(callback: types.CallbackQuery, state: FSMContext):
         res_text = aternos_action(act)
         
         if act == "status":
-            await callback.message.answer(f"📊 *Состояние сервера:*\n• Статус: {res_text}", parse_mode="Markdown")
+            await callback.message.answer(f"📊 *Состояние服务器:*\n• Статус: {res_text}", parse_mode="Markdown")
         elif act == "console":
             await callback.message.answer(f"💻 *Последние строки консоли:*\n```\n{res_text}\n```", parse_mode="Markdown")
         else:
@@ -175,7 +186,7 @@ async def handle_callbacks(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         await state.set_state(SessionStates.waiting_for_session_name)
         await callback.message.edit_text(
-            "🔑 *Настройка (Шаг 1 из 4)*\n\nОтправьте **ИМЯ** сессионной куки из левой колонки (например, `ATERNOS_SESSION`):",
+            "🔑 *Настройка (Шаг 1 из 4)*\n\nОтправьте **ИМЯ** сессионной куки (например, `ATERNOS_SESSION`):",
             parse_mode="Markdown", reply_markup=get_cancel_keyboard()
         )
 
@@ -185,7 +196,7 @@ async def process_session_name(message: types.Message, state: FSMContext):
     save_stored_value("session_name", message.text)
     await state.set_state(SessionStates.waiting_for_session_val)
     await message.answer(
-        "✅ Имя принято.\n\n*Шаг 2 из 4*: Теперь отправьте **ЗНАЧЕНИЕ** этой сессионной куки (из правой колонки):",
+        "✅ Имя принято.\n\n*Шаг 2 из 4*: Теперь отправьте **ЗНАЧЕНИЕ** этой сессионной куки:",
         parse_mode="Markdown", reply_markup=get_cancel_keyboard()
     )
 
@@ -205,7 +216,7 @@ async def process_gamera(message: types.Message, state: FSMContext):
     save_stored_value("gamera_user_id", message.text)
     await state.set_state(SessionStates.waiting_for_uid)
     await message.answer(
-        "✅ Принято.\n\n*Шаг 4 из 4*: Отправьте значение для куки:\n`uid` (или `u` из самого низа вашего списка)",
+        "✅ Принято.\n\n*Шаг 4 из 4*: Отправьте значение для куки:\n`uid`",
         parse_mode="Markdown", reply_markup=get_cancel_keyboard()
     )
 
@@ -214,7 +225,7 @@ async def process_uid(message: types.Message, state: FSMContext):
     if not is_owner(message): return
     save_stored_value("uid", message.text)
     await state.clear()
-    await message.answer("🎉 Все 4 параметра авторизации успешно сохранены! Попробуйте проверить статус.", reply_markup=get_main_keyboard())
+    await message.answer("🎉 Все параметры успешно перезаписаны на клиенте с TLS-обходом!", reply_markup=get_main_keyboard())
 
 async def main():
     Thread(target=run_fake_web_server, daemon=True).start()
